@@ -53,6 +53,7 @@ public class MainActivity extends Activity {
     };
 
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
+    private final List<ContactItem> allContacts = new ArrayList<>();
     private final List<ContactItem> contacts = new ArrayList<>();
     private final List<AccountOption> accounts = new ArrayList<>();
     private final Set<Long> selectedIds = new HashSet<>();
@@ -60,6 +61,7 @@ public class MainActivity extends Activity {
     private LinearLayout contactList;
     private TextView statusView;
     private TextView selectionView;
+    private Spinner sourceSpinner;
     private Spinner destinationSpinner;
     private Button permissionButton;
     private Button refreshButton;
@@ -67,6 +69,9 @@ public class MainActivity extends Activity {
     private Button copyButton;
     private Button moveButton;
     private ProgressBar progressBar;
+    private AccountKey activeSourceFilter;
+    private boolean sourceFilterInitialized;
+    private boolean updatingSourceSpinner;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -108,6 +113,30 @@ public class MainActivity extends Activity {
         TextView intro = text("Copy or move contacts between your device and synced accounts.", 14, COLOR_MUTED, false);
         intro.setPadding(0, dp(6), 0, dp(14));
         root.addView(intro, matchWrap());
+
+        LinearLayout sourceCard = card();
+        TextView sourceLabel = text("Show contacts from", 13, COLOR_MUTED, true);
+        sourceCard.addView(sourceLabel, matchWrap());
+        sourceSpinner = new Spinner(this);
+        sourceSpinner.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(android.widget.AdapterView<?> parent, View view, int position, long id) {
+                if (updatingSourceSpinner || parent.getItemAtPosition(position) == null) return;
+                SourceOption option = (SourceOption) parent.getItemAtPosition(position);
+                if (sourceFilterInitialized && equal(activeSourceFilter, option.key)) return;
+                activeSourceFilter = option.key;
+                sourceFilterInitialized = true;
+                selectedIds.clear();
+                applyContactFilter();
+                statusView.setText(visibleContactsSummary());
+            }
+
+            @Override
+            public void onNothingSelected(android.widget.AdapterView<?> parent) {
+            }
+        });
+        sourceCard.addView(sourceSpinner, matchWrap());
+        root.addView(sourceCard, matchWrap());
 
         LinearLayout accountCard = card();
         TextView destinationLabel = text("Destination account", 13, COLOR_MUTED, true);
@@ -176,11 +205,15 @@ public class MainActivity extends Activity {
     }
 
     private void showPermissionPrompt() {
+        allContacts.clear();
         contacts.clear();
         accounts.clear();
         selectedIds.clear();
-        renderContacts();
+        activeSourceFilter = null;
+        sourceFilterInitialized = false;
         updateAccountSpinner();
+        updateSourceSpinner();
+        renderContacts();
         statusView.setText("Allow contact access to choose contacts and destination accounts.");
         permissionButton.setVisibility(View.VISIBLE);
         refreshActionAvailability();
@@ -222,18 +255,16 @@ public class MainActivity extends Activity {
                 List<ContactItem> loadedContacts = readContacts();
                 List<AccountOption> loadedAccounts = readAccounts(loadedContacts);
                 runOnUiThread(() -> {
+                    allContacts.clear();
+                    allContacts.addAll(loadedContacts);
                     contacts.clear();
-                    contacts.addAll(loadedContacts);
                     accounts.clear();
                     accounts.addAll(loadedAccounts);
-                    selectedIds.retainAll(idsOf(loadedContacts));
                     updateAccountSpinner();
-                    renderContacts();
+                    updateSourceSpinner();
+                    applyContactFilter();
                     permissionButton.setVisibility(View.GONE);
-                    statusView.setText(loadedContacts.size() + (loadedContacts.size() == 1 ? " contact" : " contacts")
-                            + " found across " + loadedAccounts.size()
-                            + (loadedAccounts.size() == 1 ? " account." : " accounts."));
-                    setBusy(false, statusView.getText().toString());
+                    setBusy(false, visibleContactsSummary());
                 });
             } catch (Exception e) {
                 runOnUiThread(() -> {
@@ -338,6 +369,57 @@ public class MainActivity extends Activity {
         }
         if (!accounts.isEmpty()) destinationSpinner.setSelection(selectedIndex);
         destinationSpinner.setEnabled(!accounts.isEmpty() && !isBusy());
+    }
+
+    private void updateSourceSpinner() {
+        AccountKey previousFilter = activeSourceFilter;
+        List<SourceOption> options = new ArrayList<>();
+        options.add(new SourceOption(null, "All accounts"));
+        for (AccountOption account : accounts) {
+            options.add(new SourceOption(account.key, account.label));
+        }
+
+        int selectedIndex = 0;
+        if (previousFilter != null) {
+            for (int i = 0; i < options.size(); i++) {
+                if (options.get(i).key != null && options.get(i).key.equals(previousFilter)) {
+                    selectedIndex = i;
+                    break;
+                }
+            }
+        }
+
+        ArrayAdapter<SourceOption> adapter = new ArrayAdapter<>(
+                this, android.R.layout.simple_spinner_item, options);
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        updatingSourceSpinner = true;
+        sourceSpinner.setAdapter(adapter);
+        sourceSpinner.setSelection(selectedIndex);
+        updatingSourceSpinner = false;
+
+        AccountKey selectedFilter = options.get(selectedIndex).key;
+        boolean filterChanged = !sourceFilterInitialized || !equal(activeSourceFilter, selectedFilter);
+        activeSourceFilter = selectedFilter;
+        sourceFilterInitialized = true;
+        if (filterChanged) selectedIds.retainAll(idsOf(allContacts));
+        sourceSpinner.setEnabled(options.size() > 1 && !isBusy());
+    }
+
+    private void applyContactFilter() {
+        contacts.clear();
+        for (ContactItem item : allContacts) {
+            if (activeSourceFilter == null || activeSourceFilter.equals(item.account)) contacts.add(item);
+        }
+        selectedIds.retainAll(idsOf(contacts));
+        renderContacts();
+    }
+
+    private String visibleContactsSummary() {
+        String count = contacts.size() + (contacts.size() == 1 ? " contact" : " contacts");
+        String source = activeSourceFilter == null
+                ? "all accounts"
+                : new AccountOption(activeSourceFilter).label;
+        return count + " shown from " + source + ".";
     }
 
     private void renderContacts() {
@@ -550,6 +632,8 @@ public class MainActivity extends Activity {
         selectAllButton.setEnabled(!busy && !contacts.isEmpty());
         copyButton.setEnabled(!busy && !selectedIds.isEmpty() && selectedAccount() != null);
         moveButton.setEnabled(!busy && !selectedIds.isEmpty() && selectedAccount() != null);
+        sourceSpinner.setEnabled(!busy && sourceSpinner.getAdapter() != null
+                && sourceSpinner.getAdapter().getCount() > 1);
         destinationSpinner.setEnabled(!busy && !accounts.isEmpty());
         permissionButton.setEnabled(!busy);
     }
@@ -565,6 +649,8 @@ public class MainActivity extends Activity {
         selectAllButton.setEnabled(!busy && !contacts.isEmpty());
         copyButton.setEnabled(!busy && !selectedIds.isEmpty() && selectedAccount() != null);
         moveButton.setEnabled(!busy && !selectedIds.isEmpty() && selectedAccount() != null);
+        sourceSpinner.setEnabled(!busy && sourceSpinner.getAdapter() != null
+                && sourceSpinner.getAdapter().getCount() > 1);
         destinationSpinner.setEnabled(!busy && !accounts.isEmpty());
     }
 
@@ -693,6 +779,21 @@ public class MainActivity extends Activity {
         AccountOption(AccountKey key) {
             this.key = key;
             this.label = key.displayLabel();
+        }
+
+        @Override
+        public String toString() {
+            return label;
+        }
+    }
+
+    private static final class SourceOption {
+        final AccountKey key;
+        final String label;
+
+        SourceOption(AccountKey key, String label) {
+            this.key = key;
+            this.label = label;
         }
 
         @Override

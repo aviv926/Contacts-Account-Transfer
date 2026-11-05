@@ -6,8 +6,9 @@ A small Android app for copying or moving raw contacts between accounts visible 
 
 1. Install and open the app on the device.
 2. Grant read and write access to contacts.
-3. Choose a destination account. Accounts are listed when they already contain at least one contact.
-4. Select contacts and choose **Copy selected** or **Move selected**.
+3. Choose a source in **Show contacts from** to filter the list to one account, or leave **All accounts** selected.
+4. Choose a destination account. Accounts are listed when they already contain at least one contact.
+5. Select the visible contacts and choose **Copy selected** or **Move selected**. **Select all** applies only to the current source filter.
 
 Move asks for confirmation. Each selected contact is copied in a single Contacts Provider batch; for a move, deleting the source is part of that same batch. If that contact's copy fails, its source remains. Contacts in the same account as the destination are skipped.
 
