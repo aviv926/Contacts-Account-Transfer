@@ -84,8 +84,6 @@ public class MainActivity extends Activity {
     private ProgressBar progressBar;
     private AccountKey activeSourceFilter;
     private GroupOption activeGroupFilter;
-    private boolean sourceFilterInitialized;
-    private boolean groupFilterInitialized;
     private boolean updatingSourceSpinner;
     private boolean updatingGroupSpinner;
 
@@ -93,8 +91,7 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         buildScreen();
-        if (hasContactsPermission()) reloadContacts();
-        else showPermissionPrompt();
+        if (hasContactsPermission()) reloadContacts(); else showPermissionPrompt();
     }
 
     @Override
@@ -125,11 +122,10 @@ public class MainActivity extends Activity {
         sourceSpinner = new Spinner(this);
         sourceSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             @Override public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
-                if (updatingSourceSpinner || parent.getItemAtPosition(position) == null) return;
+                if (parent.getItemAtPosition(position) == null) return;
                 SourceOption option = (SourceOption) parent.getItemAtPosition(position);
-                if (sourceFilterInitialized && equal(activeSourceFilter, option.key)) return;
+                if (updatingSourceSpinner || equal(activeSourceFilter, option.key)) return;
                 activeSourceFilter = option.key;
-                sourceFilterInitialized = true;
                 selectedIds.clear();
                 applyContactFilter();
                 statusView.setText(visibleContactsSummary());
@@ -150,11 +146,11 @@ public class MainActivity extends Activity {
         groupSpinner = new Spinner(this);
         groupSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             @Override public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
-                if (updatingGroupSpinner || parent.getItemAtPosition(position) == null) return;
+                if (parent.getItemAtPosition(position) == null) return;
                 GroupOption option = (GroupOption) parent.getItemAtPosition(position);
-                if (groupFilterInitialized && equal(activeGroupFilter, option)) return;
-                activeGroupFilter = option;
-                groupFilterInitialized = true;
+                GroupOption selected = option.isAll ? null : option;
+                if (updatingGroupSpinner || equal(activeGroupFilter, selected)) return;
+                activeGroupFilter = selected;
                 selectedIds.clear();
                 applyContactFilter();
                 statusView.setText(visibleContactsSummary());
@@ -182,10 +178,8 @@ public class MainActivity extends Activity {
         permissionButton.setVisibility(View.GONE);
         permissionButton.setOnClickListener(view -> requestContactsPermission());
         root.addView(permissionButton, matchWrap());
-
         LinearLayout listHeader = horizontal();
-        TextView contactsLabel = text("Contacts", 18, COLOR_TEXT, true);
-        listHeader.addView(contactsLabel, new LinearLayout.LayoutParams(0, dp(40), 1));
+        listHeader.addView(text("Contacts", 18, COLOR_TEXT, true), new LinearLayout.LayoutParams(0, dp(40), 1));
         selectionView = text("0 selected", 13, COLOR_MUTED, false);
         listHeader.addView(selectionView, wrapWrap());
         root.addView(listHeader, matchWrap());
@@ -213,7 +207,6 @@ public class MainActivity extends Activity {
         actions.addView(moveButton, weighted());
         actions.addView(deleteButton, weighted());
         root.addView(actions, matchWrap());
-
         refreshButton.setOnClickListener(view -> reloadContacts());
         selectAllButton.setOnClickListener(view -> toggleSelectAll());
         importButton.setOnClickListener(view -> chooseImportFile());
@@ -232,7 +225,6 @@ public class MainActivity extends Activity {
     private void showPermissionPrompt() {
         allContacts.clear(); contacts.clear(); accounts.clear(); groups.clear(); selectedIds.clear();
         activeSourceFilter = null; activeGroupFilter = null;
-        sourceFilterInitialized = false; groupFilterInitialized = false;
         updateAccountSpinner(); updateSourceSpinner(); updateGroupSpinner(); renderContacts();
         statusView.setText("Allow contact access to manage contacts and groups.");
         permissionButton.setVisibility(View.VISIBLE);
@@ -248,7 +240,8 @@ public class MainActivity extends Activity {
         requestPermissions(new String[]{Manifest.permission.READ_CONTACTS, Manifest.permission.WRITE_CONTACTS}, CONTACT_PERMISSION_REQUEST);
     }
 
-    @Override public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         if (requestCode != CONTACT_PERMISSION_REQUEST) return;
         if (hasContactsPermission()) { permissionButton.setVisibility(View.GONE); reloadContacts(); }
@@ -261,11 +254,11 @@ public class MainActivity extends Activity {
         worker.execute(() -> {
             try {
                 List<GroupOption> loadedGroups = readGroups();
-                List<ContactItem> loadedContacts = readContacts(loadedGroups);
+                List<ContactItem> loadedContacts = readContacts();
                 List<AccountOption> loadedAccounts = readAccounts(loadedContacts);
                 runOnUiThread(() -> {
                     allContacts.clear(); allContacts.addAll(loadedContacts);
-                    contacts.clear(); accounts.clear(); accounts.addAll(loadedAccounts);
+                    accounts.clear(); accounts.addAll(loadedAccounts);
                     groups.clear(); groups.addAll(loadedGroups);
                     updateAccountSpinner(); updateSourceSpinner(); updateGroupSpinner();
                     applyContactFilter(); permissionButton.setVisibility(View.GONE);
@@ -284,24 +277,21 @@ public class MainActivity extends Activity {
         try (Cursor cursor = getContentResolver().query(ContactsContract.Groups.CONTENT_URI, projection,
                 ContactsContract.Groups.DELETED + "=0", null, ContactsContract.Groups.TITLE + " COLLATE NOCASE")) {
             if (cursor != null) while (cursor.moveToNext()) {
-                long id = cursor.getLong(0);
-                String title = cursor.isNull(1) ? "Untitled group" : cursor.getString(1);
                 AccountKey account = new AccountKey(cursor.isNull(2) ? null : cursor.getString(2),
                         cursor.isNull(3) ? null : cursor.getString(3), cursor.isNull(4) ? null : cursor.getString(4));
-                result.add(new GroupOption(id, title, account));
+                result.add(new GroupOption(cursor.getLong(0), cursor.isNull(1) ? "Untitled group" : cursor.getString(1), account));
             }
         }
         Collections.sort(result, (a, b) -> a.toString().compareToIgnoreCase(b.toString()));
         return result;
     }
 
-    private List<ContactItem> readContacts(List<GroupOption> groupOptions) {
+    private List<ContactItem> readContacts() {
         Map<Long, String> names = new HashMap<>(), fallbacks = new HashMap<>();
         Map<Long, Set<Long>> memberships = new HashMap<>();
-        String[] dataProjection = {ContactsContract.Data.RAW_CONTACT_ID, ContactsContract.Data.MIMETYPE,
-                ContactsContract.Data.DATA1, ContactsContract.Data.DATA_ROW_ID};
-        try (Cursor cursor = getContentResolver().query(ContactsContract.Data.CONTENT_URI, dataProjection,
-                null, null, null)) {
+        // GroupMembership stores its group reference in Data.DATA1; DATA_ROW_ID is not a ContactsContract.Data column.
+        String[] dataProjection = {ContactsContract.Data.RAW_CONTACT_ID, ContactsContract.Data.MIMETYPE, ContactsContract.Data.DATA1};
+        try (Cursor cursor = getContentResolver().query(ContactsContract.Data.CONTENT_URI, dataProjection, null, null, null)) {
             if (cursor != null) while (cursor.moveToNext()) {
                 long rawId = cursor.getLong(0);
                 String mime = cursor.getString(1);
@@ -311,11 +301,9 @@ public class MainActivity extends Activity {
                 } else if ((ContactsContract.CommonDataKinds.Phone.CONTENT_ITEM_TYPE.equals(mime)
                         || ContactsContract.CommonDataKinds.Email.CONTENT_ITEM_TYPE.equals(mime)) && value != null && !value.trim().isEmpty()) {
                     if (!fallbacks.containsKey(rawId)) fallbacks.put(rawId, value.trim());
-                } else if (ContactsContract.CommonDataKinds.GroupMembership.CONTENT_ITEM_TYPE.equals(mime) && !cursor.isNull(2)) {
-                    try {
-                        long groupId = Long.parseLong(value);
-                        memberships.computeIfAbsent(rawId, ignored -> new HashSet<>()).add(groupId);
-                    } catch (NumberFormatException ignored) { }
+                } else if (ContactsContract.CommonDataKinds.GroupMembership.CONTENT_ITEM_TYPE.equals(mime) && value != null) {
+                    try { memberships.computeIfAbsent(rawId, ignored -> new HashSet<>()).add(Long.parseLong(value)); }
+                    catch (NumberFormatException ignored) { }
                 }
             }
         }
@@ -335,7 +323,7 @@ public class MainActivity extends Activity {
                 result.add(new ContactItem(id, name, account, groupIds == null ? new HashSet<>() : new HashSet<>(groupIds)));
             }
         }
-        Collections.sort(result, (left, right) -> left.name.compareToIgnoreCase(right.name));
+        Collections.sort(result, (a, b) -> a.name.compareToIgnoreCase(b.name));
         return result;
     }
 
@@ -368,7 +356,7 @@ public class MainActivity extends Activity {
         ArrayAdapter<SourceOption> adapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, options);
         adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
         updatingSourceSpinner = true; sourceSpinner.setAdapter(adapter); sourceSpinner.setSelection(selected); updatingSourceSpinner = false;
-        activeSourceFilter = options.get(selected).key; sourceFilterInitialized = true;
+        activeSourceFilter = options.get(selected).key;
         sourceSpinner.setEnabled(options.size() > 1 && !isBusy());
     }
 
@@ -382,7 +370,6 @@ public class MainActivity extends Activity {
         adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
         updatingGroupSpinner = true; groupSpinner.setAdapter(adapter); groupSpinner.setSelection(selected); updatingGroupSpinner = false;
         activeGroupFilter = options.get(selected).isAll ? null : options.get(selected);
-        groupFilterInitialized = true;
         groupSpinner.setEnabled(options.size() > 1 && !isBusy());
     }
 
@@ -419,7 +406,8 @@ public class MainActivity extends Activity {
             });
             row.addView(checkBox, matchWrap());
             TextView accountText = text("From " + item.account.displayLabel(), 12, COLOR_MUTED, false);
-            accountText.setPadding(dp(42), 0, 0, dp(6)); row.addView(accountText, matchWrap()); contactList.addView(row, params);
+            accountText.setPadding(dp(42), 0, 0, dp(6));
+            row.addView(accountText, matchWrap()); contactList.addView(row, params);
         }
         if (contacts.isEmpty()) {
             TextView empty = text("No contacts found for this account and group filter.", 14, COLOR_MUTED, false);
@@ -430,7 +418,8 @@ public class MainActivity extends Activity {
 
     private void toggleSelectAll() {
         if (contacts.isEmpty()) return;
-        if (selectedIds.size() == contacts.size()) selectedIds.clear(); else { selectedIds.clear(); selectedIds.addAll(idsOf(contacts)); }
+        if (selectedIds.size() == contacts.size()) selectedIds.clear();
+        else { selectedIds.clear(); selectedIds.addAll(idsOf(contacts)); }
         renderContacts();
     }
 
@@ -454,7 +443,8 @@ public class MainActivity extends Activity {
         new AlertDialog.Builder(this).setTitle("Delete contacts?")
                 .setMessage("Permanently delete " + selected.size() + (selected.size() == 1 ? " contact" : " contacts")
                         + " from " + accountLabel + "? Contacts in other accounts will not be changed.")
-                .setNegativeButton("Cancel", null).setPositiveButton("Delete", (dialog, which) -> deleteSelected(selected, activeSourceFilter)).show();
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Delete", (dialog, which) -> deleteSelected(selected, activeSourceFilter)).show();
     }
 
     private void deleteSelected(List<ContactItem> selected, AccountKey account) {
@@ -570,11 +560,11 @@ public class MainActivity extends Activity {
         startActivityForResult(intent, REQUEST_EXPORT_CSV);
     }
 
-    @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
         if (resultCode != RESULT_OK || data == null || data.getData() == null) return;
-        final Uri uri = data.getData();
-        final GroupOption group = activeGroupFilter;
+        Uri uri = data.getData(); GroupOption group = activeGroupFilter;
         if (group == null) { toast("Select a group first."); return; }
         if (requestCode == REQUEST_IMPORT_CSV) importCsv(uri, group);
         else if (requestCode == REQUEST_EXPORT_CSV) exportCsv(uri, group);
@@ -589,18 +579,14 @@ public class MainActivity extends Activity {
                 List<List<String>> rows = parseCsv(input);
                 int start = !rows.isEmpty() && !rows.get(0).isEmpty() && "name".equalsIgnoreCase(rows.get(0).get(0).trim()) ? 1 : 0;
                 for (int i = start; i < rows.size(); i++) {
-                    List<String> row = rows.get(i);
-                    String name = field(row, 0).trim();
-                    List<String> phones = splitValues(field(row, 1));
-                    List<String> emails = splitValues(field(row, 2));
+                    List<String> row = rows.get(i); String name = field(row, 0).trim();
+                    List<String> phones = splitValues(field(row, 1)), emails = splitValues(field(row, 2));
                     if (name.isEmpty() && phones.isEmpty() && emails.isEmpty()) continue;
-                    insertImportedContact(group, name, phones, emails);
-                    imported++;
+                    insertImportedContact(group, name, phones, emails); imported++;
                 }
             } catch (Exception e) {
                 final int count = imported; final String error = errorMessage(e);
-                runOnUiThread(() -> { setBusy(false, "Imported " + count + " contact(s); import stopped: " + error); reloadContacts(); });
-                return;
+                runOnUiThread(() -> { setBusy(false, "Imported " + count + " contact(s); import stopped: " + error); reloadContacts(); }); return;
             }
             final int count = imported;
             runOnUiThread(() -> { setBusy(false, "Imported " + count + (count == 1 ? " contact" : " contacts") + " into " + group.title + "."); reloadContacts(); });
@@ -617,8 +603,7 @@ public class MainActivity extends Activity {
         if (!name.isEmpty()) {
             ContentValues values = new ContentValues(); values.put(ContactsContract.Data.MIMETYPE, ContactsContract.CommonDataKinds.StructuredName.CONTENT_ITEM_TYPE);
             values.put(ContactsContract.CommonDataKinds.StructuredName.DISPLAY_NAME, name);
-            operations.add(ContentProviderOperation.newInsert(ContactsContract.Data.CONTENT_URI).withValueBackReference(ContactsContract.Data.RAW_CONTACT_ID, rawIndex)
-                    .withValues(values).build());
+            operations.add(ContentProviderOperation.newInsert(ContactsContract.Data.CONTENT_URI).withValueBackReference(ContactsContract.Data.RAW_CONTACT_ID, rawIndex).withValues(values).build());
         }
         for (String phone : phones) if (!phone.trim().isEmpty()) {
             ContentValues values = new ContentValues(); values.put(ContactsContract.Data.MIMETYPE, ContactsContract.CommonDataKinds.Phone.CONTENT_ITEM_TYPE);
@@ -650,11 +635,9 @@ public class MainActivity extends Activity {
                 writer.write("Name,Phones,Emails\r\n");
                 for (ContactItem item : snapshot) {
                     List<ContentValues> values = readContactData(item.id);
-                    List<String> phones = new ArrayList<>(), emails = new ArrayList<>();
-                    String name = item.name;
+                    List<String> phones = new ArrayList<>(), emails = new ArrayList<>(); String name = item.name;
                     for (ContentValues value : values) {
-                        String mime = value.getAsString(ContactsContract.Data.MIMETYPE);
-                        String data = value.getAsString(ContactsContract.Data.DATA1);
+                        String mime = value.getAsString(ContactsContract.Data.MIMETYPE), data = value.getAsString(ContactsContract.Data.DATA1);
                         if (data == null) continue;
                         if (ContactsContract.CommonDataKinds.StructuredName.CONTENT_ITEM_TYPE.equals(mime)) name = data;
                         else if (ContactsContract.CommonDataKinds.Phone.CONTENT_ITEM_TYPE.equals(mime)) phones.add(data);
@@ -664,7 +647,7 @@ public class MainActivity extends Activity {
                 }
                 writer.flush();
             } catch (Exception e) {
-                final String error = errorMessage(e); runOnUiThread(() -> setBusy(false, "Export failed: " + error)); return;
+                String error = errorMessage(e); runOnUiThread(() -> setBusy(false, "Export failed: " + error)); return;
             }
             runOnUiThread(() -> setBusy(false, "Exported " + snapshot.size() + (snapshot.size() == 1 ? " contact" : " contacts") + " from " + group.title + "."));
         });
@@ -673,16 +656,12 @@ public class MainActivity extends Activity {
     private List<List<String>> parseCsv(InputStream input) throws Exception {
         List<List<String>> rows = new ArrayList<>();
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(input, StandardCharsets.UTF_8))) {
-            List<String> row = new ArrayList<>(); StringBuilder field = new StringBuilder();
-            boolean quoted = false; int value;
+            List<String> row = new ArrayList<>(); StringBuilder field = new StringBuilder(); boolean quoted = false; int value;
             while ((value = reader.read()) != -1) {
                 char c = (char) value;
                 if (quoted) {
-                    if (c == '"') {
-                        reader.mark(1); int next = reader.read();
-                        if (next == '"') field.append('"');
-                        else { quoted = false; if (next != -1) reader.reset(); }
-                    } else field.append(c);
+                    if (c == '"') { reader.mark(1); int next = reader.read(); if (next == '"') field.append('"'); else { quoted = false; if (next != -1) reader.reset(); } }
+                    else field.append(c);
                 } else if (c == '"' && field.length() == 0) quoted = true;
                 else if (c == ',') { row.add(field.toString()); field.setLength(0); }
                 else if (c == '\n' || c == '\r') {
@@ -700,22 +679,18 @@ public class MainActivity extends Activity {
 
     private String csv(String value) { return "\"" + (value == null ? "" : value.replace("\"", "\"\"")) + "\""; }
     private String joinValues(List<String> values) { StringBuilder result = new StringBuilder(); for (String value : values) { if (result.length() > 0) result.append('\n'); result.append(value); } return result.toString(); }
-    private List<String> splitValues(String value) { List<String> result = new ArrayList<>(); if (value == null || value.isEmpty()) return result; Collections.addAll(result, value.split("\\r?\\n", -1)); return result; }
+    private List<String> splitValues(String value) { List<String> result = new ArrayList<>(); if (value != null && !value.isEmpty()) Collections.addAll(result, value.split("\\r?\\n", -1)); return result; }
     private String field(List<String> row, int index) { return index < row.size() && row.get(index) != null ? row.get(index) : ""; }
     private String safeFileName(String value) { return value.replaceAll("[^A-Za-z0-9._-]", "_"); }
-
     private void showPermissionIfNeeded() { if (!hasContactsPermission()) permissionButton.setVisibility(View.VISIBLE); }
-    private void setBusy(boolean busy, String message) {
-        statusView.setText(message); progressBar.setVisibility(busy ? View.VISIBLE : View.GONE);
-        refreshActionAvailability(); permissionButton.setEnabled(!busy);
-    }
+    private void setBusy(boolean busy, String message) { statusView.setText(message); progressBar.setVisibility(busy ? View.VISIBLE : View.GONE); refreshActionAvailability(); permissionButton.setEnabled(!busy); }
     private boolean isBusy() { return progressBar != null && progressBar.getVisibility() == View.VISIBLE; }
+
     private void refreshActionAvailability() {
         if (refreshButton == null) return;
-        boolean busy = isBusy();
+        boolean busy = isBusy(), selected = !selectedIds.isEmpty();
         refreshButton.setEnabled(!busy && hasContactsPermission());
         selectAllButton.setEnabled(!busy && !contacts.isEmpty());
-        boolean selected = !selectedIds.isEmpty();
         copyButton.setEnabled(!busy && selected && selectedAccount() != null);
         moveButton.setEnabled(!busy && selected && selectedAccount() != null);
         deleteButton.setEnabled(!busy && selected && activeSourceFilter != null && hasContactsPermission());
@@ -725,11 +700,11 @@ public class MainActivity extends Activity {
         destinationSpinner.setEnabled(!busy && !accounts.isEmpty());
         groupSpinner.setEnabled(!busy && groupSpinner.getAdapter() != null && groupSpinner.getAdapter().getCount() > 1);
     }
+
     private AccountOption selectedAccount() { return destinationSpinner == null || destinationSpinner.getSelectedItem() == null ? null : (AccountOption) destinationSpinner.getSelectedItem(); }
     private List<ContactItem> selectedContacts() { List<ContactItem> result = new ArrayList<>(); for (ContactItem item : contacts) if (selectedIds.contains(item.id)) result.add(item); return result; }
     private Set<Long> idsOf(List<ContactItem> items) { Set<Long> result = new HashSet<>(); for (ContactItem item : items) result.add(item.id); return result; }
     private void toast(String message) { Toast.makeText(this, message, Toast.LENGTH_LONG).show(); }
-
     private LinearLayout card() { LinearLayout layout = new LinearLayout(this); layout.setOrientation(LinearLayout.VERTICAL); layout.setBackgroundColor(COLOR_CARD); layout.setPadding(dp(14), dp(6), dp(14), dp(6)); LinearLayout.LayoutParams params = matchWrap(); params.bottomMargin = dp(6); layout.setLayoutParams(params); return layout; }
     private TextView text(String value, float size, int color, boolean bold) { TextView view = new TextView(this); view.setText(value); view.setTextSize(size); view.setTextColor(color); if (bold) view.setTypeface(Typeface.DEFAULT, Typeface.BOLD); return view; }
     private Button button(String label) { Button view = new Button(this); view.setText(label); view.setAllCaps(false); view.setTextColor(COLOR_ACCENT); return view; }
@@ -748,7 +723,8 @@ public class MainActivity extends Activity {
         AccountKey(String name, String type, String dataSet) { this.name = name; this.type = type; this.dataSet = dataSet; }
         String displayLabel() {
             if (name == null && type == null) return dataSet == null || dataSet.isEmpty() ? "On this device" : "On this device · " + dataSet;
-            String provider = providerLabel(type); String label = name == null || name.isEmpty() ? (provider == null ? type : provider) : (provider == null ? name : name + " · " + provider);
+            String provider = providerLabel(type);
+            String label = name == null || name.isEmpty() ? (provider == null ? type : provider) : (provider == null ? name : name + " · " + provider);
             return dataSet == null || dataSet.isEmpty() ? label : label + " · " + dataSet;
         }
         @Override public boolean equals(Object other) { if (!(other instanceof AccountKey)) return false; AccountKey that = (AccountKey) other; return equal(name, that.name) && equal(type, that.type) && equal(dataSet, that.dataSet); }
